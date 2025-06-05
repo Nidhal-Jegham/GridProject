@@ -9,3 +9,6 @@ torchvision>=0.15.0      # if you need any vision helpers
 torchaudio>=2.0.0        # if you need any audio helpers
 transformers>=4.30.0     # for model loading/tokenization
 accelerate>=0.21.0       # for fast inference & device management
+streamlit-oauth>=0.1.5   # Google login
+google-auth>=2.0.0
+google-auth-oauthlib>=0.5

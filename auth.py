@@ -56,3 +56,19 @@ class AuthManager:
             (hashed, username),
         )
         self.conn.commit()
+
+    def user_exists(self, username: str) -> bool:
+        c = self.conn.cursor()
+        c.execute(
+            "SELECT 1 FROM users WHERE username=?",
+            (username,),
+        )
+        return c.fetchone() is not None
+
+    def login_with_google(self, email: str) -> bool:
+        """Create the user if needed and mark them as logged in."""
+        if not self.user_exists(email):
+            import secrets
+            random_pw = secrets.token_hex(16)
+            self.create_user(email, random_pw)
+        return True
