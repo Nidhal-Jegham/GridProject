@@ -1,0 +1,11 @@
+# .venv will pull in these when you run:
+#   pip install -r requirements.txt
+
+python-dotenv>=0.21.0    # for load_dotenv()
+paramiko>=2.12.0         # SSHClientWrapper
+streamlit>=1.25.0        # your Streamlit UI
+torch>=2.0.0             # import torch in llama_server.py
+torchvision>=0.15.0      # if you need any vision helpers
+torchaudio>=2.0.0        # if you need any audio helpers
+transformers>=4.30.0     # for model loading/tokenization
+accelerate>=0.21.0       # for fast inference & device management

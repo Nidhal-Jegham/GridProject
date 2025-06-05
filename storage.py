@@ -6,40 +6,61 @@ DB_FILE = os.getenv("CHAT_DB_PATH", "chat_history.db")
 
 class StorageManager:
     """
-    Manages chat sessions and messages using SQLite.
+    Manages chat sessions and messages using SQLite, with auto-recovery and persistent titles.
+
     Tables:
-      - chats(chat_id TEXT PRIMARY KEY, created_at TEXT)
-      - messages(msg_id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT, role TEXT, content TEXT, timestamp TEXT)
+      - chats(chat_id TEXT PRIMARY KEY, created_at TEXT, title TEXT)
+      - messages(msg_id INT PRIMARY KEY AUTOINCREMENT, chat_id TEXT, role TEXT, content TEXT, timestamp TEXT)
     """
     def __init__(self, db_path: str = None):
         self.db_path = db_path or DB_FILE
-        self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
-        self._init_db()
+        self._connect_and_init()
+
+    def _connect_and_init(self):
+        try:
+            self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
+            self.conn.execute("PRAGMA journal_mode=WAL;")
+            self.conn.execute("PRAGMA synchronous=NORMAL;")
+            cur = self.conn.cursor()
+            cur.execute("PRAGMA integrity_check;")
+            if cur.fetchone()[0] != 'ok':
+                raise sqlite3.DatabaseError("Integrity check failed")
+        except (sqlite3.DatabaseError, sqlite3.OperationalError):
+            try: self.conn.close()
+            except: pass
+            corrupt = self.db_path + ".corrupt"
+            if os.path.exists(self.db_path):
+                os.replace(self.db_path, corrupt)
+            self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
+            self.conn.execute("PRAGMA journal_mode=WAL;")
+            self.conn.execute("PRAGMA synchronous=NORMAL;")
+        finally:
+            self._init_db()
 
     def _init_db(self):
         c = self.conn.cursor()
+        # Create chats table
         c.execute("""
             CREATE TABLE IF NOT EXISTS chats (
-                chat_id TEXT PRIMARY KEY,
-                created_at TEXT
+                chat_id    TEXT PRIMARY KEY,
+                created_at TEXT,
+                title      TEXT
             );
         """)
+        # Create messages table
         c.execute("""
             CREATE TABLE IF NOT EXISTS messages (
-                msg_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                chat_id TEXT,
-                role TEXT,
-                content TEXT,
-                timestamp TEXT,
+                msg_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id    TEXT,
+                role       TEXT,
+                content    TEXT,
+                timestamp  TEXT,
                 FOREIGN KEY(chat_id) REFERENCES chats(chat_id)
             );
         """)
         self.conn.commit()
 
     def create_chat(self, chat_id: str) -> None:
-        """
-        Create a new chat session with the given ID.
-        """
         now = datetime.utcnow().isoformat()
         c = self.conn.cursor()
         c.execute(
@@ -48,9 +69,26 @@ class StorageManager:
         )
         self.conn.commit()
 
+    def set_chat_title(self, chat_id: str, title: str) -> None:
+        c = self.conn.cursor()
+        c.execute(
+            "UPDATE chats SET title = ? WHERE chat_id = ?",
+            (title, chat_id)
+        )
+        self.conn.commit()
+
+    def get_chat_title(self, chat_id: str) -> str | None:
+        c = self.conn.cursor()
+        c.execute(
+            "SELECT title FROM chats WHERE chat_id = ?",
+            (chat_id,)
+        )
+        row = c.fetchone()
+        return row[0] if row and row[0] else None
+
     def append_message(self, chat_id: str, role: str, content: str) -> None:
         """
-        Append a message to a chat session.
+        role can be 'user', 'assistant', or now also 'assistant_think'
         """
         now = datetime.utcnow().isoformat()
         c = self.conn.cursor()
@@ -62,32 +100,35 @@ class StorageManager:
 
     def fetch_history(self, chat_id: str) -> list:
         """
-        Fetch all messages for a chat in chronological order.
+        Returns all messages in order, including assistant_think entries.
         """
         c = self.conn.cursor()
         c.execute(
             "SELECT role, content FROM messages WHERE chat_id = ? ORDER BY msg_id ASC",
             (chat_id,)
         )
-        rows = c.fetchall()
-        return [{"role": r[0], "content": r[1]} for r in rows]
+        return [{"role": r, "content": c} for r, c in c.fetchall()]
 
-    def list_chats(self) -> list:
+    def fetch_thinking(self, chat_id: str) -> list:
         """
-        List all chat IDs and creation times.
+        Returns only the reasoning steps (assistant_think messages) for this chat.
         """
         c = self.conn.cursor()
         c.execute(
-            "SELECT chat_id, created_at FROM chats ORDER BY created_at DESC"
+            "SELECT content FROM messages WHERE chat_id = ? AND role = 'assistant_think' ORDER BY msg_id ASC",
+            (chat_id,)
+        )
+        return [row[0] for row in c.fetchall()]
+
+    def list_chats(self) -> list:
+        c = self.conn.cursor()
+        c.execute(
+            "SELECT chat_id, created_at, title FROM chats ORDER BY created_at DESC"
         )
         return c.fetchall()
 
     def close(self):
-        self.conn.close()
-
-# Example usage:
-# sm = StorageManager()
-# sm.create_chat("session1")
-# sm.append_message("session1", "user", "Hello")
-# history = sm.fetch_history("session1")
-# print(history)
+        try:
+            self.conn.close()
+        except:
+            pass

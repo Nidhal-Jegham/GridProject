@@ -1,98 +1,174 @@
-import os
 import json
-import shlex
 import logging
-from dotenv import load_dotenv
-from remote import SSHClientWrapper
+import requests
 from storage import StorageManager
+import re
+from typing import Generator, Dict, Any
+import subprocess
 
-load_dotenv()
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class ChatClient:
     """
-    Local client that sends prompts to a remote llama_server via SSH,
-    persists chat history locally, and returns responses along with updated history.
+    HTTP-based chat client for GridAI.
+    Stores history in SQLite and forwards messages to the Ollama server.
     """
-    def __init__(self):
-        # Initialize SSH connection
-        self.ssh = SSHClientWrapper()
-        self.ssh.connect()
-
-        # Initialize storage manager for local chat persistence
+    def __init__(self, url: str = "http://127.0.0.1:11434"):
+        self.url     = url.rstrip("/")
         self.storage = StorageManager()
+        self.params  = {}
 
-        # Remote Python interpreter and script paths
-        self.remote_python = os.getenv("REMOTE_PYTHON_PATH", "python3")
-        self.remote_script = os.getenv(
-            "REMOTE_LLAMA_SCRIPT_PATH",
-            "~/llama_server.py"
-        )
-        self.model_path = os.getenv(
-            "REMOTE_MODEL_PATH",
-            "~/models/Llama-3-3b"
-        )
+    def _generate_title(self, prompt: str, model: str) -> str:
+        title_payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": "You are a helpful assistant that suggests chat titles."},
+                {"role": "user",   "content": f"Generate a short (3-5 word) title for a conversation about: \"{prompt}\""}
+            ],
+            "temperature": 0.3,
+            "top_p": 0.9,
+            "max_tokens": 10,
+            "n": 1,
+            "stream": False
+        }
+        r = requests.post(f"{self.url}/v1/chat/completions", json=title_payload, timeout=30)
+        r.raise_for_status()
+        title = r.json()["choices"][0]["message"]["content"].strip().strip('"')
+        return title
 
-    def send_message(self, chat_id: str, prompt: str) -> (str, list):
-        """
-        Send a prompt to the remote model via SSH, persist messages locally,
-        and return (response, full_history).
-        """
-        # Ensure chat session exists
+    def send_message(self, chat_id: str, prompt: str, model: str) -> (str, list, str | None, dict | None):
         self.storage.create_chat(chat_id)
-
-        # Record user message locally
         self.storage.append_message(chat_id, "user", prompt)
-
-        # Fetch full history for context
         history = self.storage.fetch_history(chat_id)
 
-        # Prepare payload for remote inference
-        payload = json.dumps({
-            "chat_id": chat_id,
-            "prompt": prompt,
-            "history": history
-        })
-        quoted = shlex.quote(payload)
-        cmd = (
-            f"echo {quoted} | {self.remote_python} {self.remote_script}"
-            f" --model-path {shlex.quote(self.model_path)}"
-        )
+        title = None
+        if len(history) == 1:
+            try:
+                title = self._generate_title(prompt, 'llama3.2:3b')
+                self.storage.set_chat_title(chat_id, title)
+            except Exception as e:
+                logger.warning(f"Failed to generate title: {e}")
 
-        logger.info(f"Running remote inference cmd: {cmd}")
-        try:
-            out = self.ssh.execute_command(cmd)
-            data = json.loads(out)
-            response = data.get("response")
-        except Exception as e:
-            logger.error(f"Error during remote inference: {e}")
-            raise
+        messages = [{"role": m["role"], "content": m["content"]} for m in history]
+        payload = {
+            "model":       model,
+            "messages":    messages,
+            "temperature": self.params.get("temperature", 0.7),
+            "top_p":       self.params.get("top_p", 0.9),
+            "max_tokens":  self.params.get("max_new_tokens", 4096),
+            "n":           1,
+            "stream":      False
+        }
 
-        # Persist assistant response locally
-        self.storage.append_message(chat_id, "assistant", response)
+        resp = requests.post(f"{self.url}/v1/chat/completions", json=payload, timeout=300)
+        resp.raise_for_status()
+        raw_response = resp.json()["choices"][0]["message"]["content"].strip()
 
-        # Return response and updated history
-        full_history = self.storage.fetch_history(chat_id)
-        return response, full_history
+        # --- Extract <think> reasoning and final answer ---
+        think_match = re.search(r"<think>\s*(.*?)\s*</think>\s*(.*)", raw_response, re.DOTALL)
+        if think_match:
+            reasoning    = think_match.group(1).strip()
+            final_answer = think_match.group(2).strip()
+            # Persist the reasoning as its own message
+            self.storage.append_message(chat_id, "assistant_think", reasoning)
+            reply = final_answer
+        else:
+            reasoning = None
+            reply     = raw_response
+
+        # Persist the final answer
+        self.storage.append_message(chat_id, "assistant", reply)
+        return reply, self.storage.fetch_history(chat_id), title, {"reasoning": reasoning, "raw": raw_response}
+
+    def stream_message(self, chat_id: str, prompt: str, model: str) -> Generator[Dict[str, str], None, None]:
+        """
+        Streams a chat completion, splitting out <think>...</think> reasoning and the final answer.
+        Yields dicts of the form {'type': 'think' or 'answer', 'text': delta_chunk}.
+        Also generates a title on the first user message.
+        """
+        # Persist user prompt
+        self.storage.append_message(chat_id, "user", prompt)
+        history = self.storage.fetch_history(chat_id)
+
+        # Generate chat title on first prompt
+        if len(history) == 1:
+            try:
+                title = self._generate_title(prompt, "llama3.2:3b")
+                self.storage.set_chat_title(chat_id, title)
+            except Exception as e:
+                logger.warning(f"Failed to generate title: {e}")
+
+        messages = [{"role": m["role"], "content": m["content"]} for m in history]
+        payload = {
+            "model":       model,
+            "messages":    messages,
+            "temperature": self.params.get("temperature", 0.7),
+            "top_p":       self.params.get("top_p", 0.9),
+            "max_tokens":  self.params.get("max_new_tokens", 4096),
+            "n":           1,
+            "stream":      True
+        }
+
+        collected     = ""
+        reasoning_buf = ""
+        answer_buf    = ""
+        in_think      = False
+        think_open    = "<think>"
+        think_close   = "</think>"
+
+        with requests.post(f"{self.url}/v1/chat/completions", json=payload, stream=True, timeout=300) as r:
+            r.raise_for_status()
+            for line in r.iter_lines():
+                if not line or line.startswith(b"data: [DONE]"):
+                    continue
+
+                piece = line.decode("utf-8").removeprefix("data: ")
+                try:
+                    token_data = json.loads(piece)
+                    delta = token_data["choices"][0]["delta"].get("content", "")
+                except Exception:
+                    continue
+
+                collected += delta
+
+                # Enter reasoning phase
+                if not in_think and think_open in collected:
+                    in_think, collected = True, collected.split(think_open, 1)[1]
+
+                # Still reasoning
+                if in_think and think_close not in collected:
+                    reasoning_buf += delta
+                    yield {"type": "think", "text": delta}
+                    continue
+
+                # Close reasoning phase
+                if in_think and think_close in collected:
+                    before_close, after_close = collected.split(think_close, 1)
+                    reasoning_buf += before_close
+                    yield {"type": "think", "text": before_close}
+                    
+                    # Persist the full reasoning
+                    self.storage.append_message(chat_id, "assistant_think", reasoning_buf.strip())
+                    in_think, collected = False, ""
+                    # leftover becomes answer
+                    if after_close:
+                        answer_buf += after_close
+                        yield {"type": "answer", "text": after_close}
+                    continue
+
+                # Normal answer streaming
+                answer_buf += delta
+                yield {"type": "answer", "text": delta}
+
+        # Persist only the final answer
+        final_answer = answer_buf.strip()
+        self.storage.append_message(chat_id, "assistant", final_answer)
 
     def list_chats(self) -> list:
-        """Return a list of all chat sessions (chat_id, created_at)."""
         return self.storage.list_chats()
 
     def get_history(self, chat_id: str) -> list:
-        """Fetch the full history for a given chat_id."""
         return self.storage.fetch_history(chat_id)
 
     def close(self):
-        """Close SSH and storage connections."""
-        self.ssh.close()
         self.storage.close()
-
-# Example usage:
-# if __name__ == '__main__':
-#     client = ChatClient()
-#     response, history = client.send_message("session1", "Hello, Llama!")
-#     print("Response:", response)
-#     print("History:", history)
-#     client.close()

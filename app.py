@@ -2,61 +2,231 @@ import streamlit as st
 import uuid
 from client import ChatClient
 
-# Initialize ChatClient
-if 'chat_client' not in st.session_state:
+st.set_page_config(layout="wide")
+
+# --- 1. Global CSS for layout & styling ---
+st.markdown("""
+<style>
+  .appview-container .main .block-container {
+    padding: 0;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+  #chat-container {
+    flex: 1;
+    overflow-y: auto;
+    padding: 1rem;
+  }
+  #input-container {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    background: #0e1117;
+    padding: 0.5rem 1rem;
+    border-top: 1px solid #333;
+    z-index: 100;
+  }
+  .appview-container .main .block-container > section {
+    margin-bottom: 60px;
+  }
+
+  /* Remove any max-width constraint so bubbles span naturally */
+  .bubble {
+    padding: 12px;
+    border-radius: 12px;
+    color: #FFF;
+  }
+  .user {
+    background: #333333;
+  }
+  .bot {
+    background: rgba(255,255,255,0.1);
+  }
+  .bot_thinking {
+    background: rgba(0,0,0,0);
+  }
+</style>
+""", unsafe_allow_html=True)
+
+# --- 2. Chat bubble helper ---
+def render_bubble(message: str, role: str):
+    if role == "user":
+        cls, align = "user", "flex-end"
+        st.markdown(f"""
+            <div style="display:flex; justify-content:{align}; margin:6px 0;">
+                <div class="bubble {cls}">
+                    {message}
+                </div>
+            </div>
+        """, unsafe_allow_html=True)
+
+    elif role == "assistant_think":
+        cls, align = "bot_thinking", "flex-start"
+        st.markdown(f"""
+            <div style="display:flex; justify-content:{align}; margin:6px 0; class="bubble {cls}">
+                {message}
+            </div>
+        """, unsafe_allow_html=True)
+
+    else:  # "assistant"
+        cls, align = "bot", "flex-start"
+        st.markdown(f"""
+            <div style="display:flex; justify-content:{align}; margin:6px 0;">
+                <div class="bubble {cls}">
+                    {message}
+                </div>
+            </div>
+        """, unsafe_allow_html=True)
+
+# --- 3. Sidebar & model config ---
+MODELS = {
+    "LLaMA 3.2 3B":    {"name": "llama3.2:3b", "ram": "2.0 GB",  "supports_think": False},
+    "LLaMA 3.1 8B":    {"name": "llama3.1:8b", "ram": "4.9 GB",  "supports_think": False},
+    "Qwen 3 14B":      {"name": "qwen3:14b",  "ram": "9.3 GB",  "supports_think": True},
+    "DeepSeek R1 70B": {"name": "deepseek-r1:70b","ram":"42 GB","supports_think": True},
+    "LLaMA 3.1 70B":   {"name": "llama3.1:70b","ram":"39 GB",   "supports_think": False},
+}
+st.sidebar.title("**Choose a model:**")
+selected = st.sidebar.selectbox("", list(MODELS.keys()))
+cfg = MODELS[selected]
+model_name = cfg["name"]
+supports_think = cfg["supports_think"]
+
+# --- 4. Generation parameters sidebar ---
+st.sidebar.title("Generation Parameters")
+with st.sidebar.expander("Adjust hyperparameters", expanded=False):
+    if "params" not in st.session_state:
+        st.session_state.params = {
+            "max_new_tokens": 4096, "min_new_tokens": 256,
+            "temperature": 0.7,     "top_p": 0.5,
+            "top_k": 50,            "repetition_penalty": 1.2,
+            "length_penalty": 2.0
+        }
+    p = st.session_state.params
+    p["max_new_tokens"] = st.slider("Max new tokens", 16, 4096, p["max_new_tokens"])
+    p["min_new_tokens"] = st.slider("Min new tokens", 0, 256, p["min_new_tokens"])
+    p["temperature"]    = st.slider("Temperature", 0.1, 1.0, p["temperature"], 0.05)
+    p["top_p"]          = st.slider("Top-p", 0.1, 1.0, p["top_p"], 0.05)
+    p["top_k"]          = st.slider("Top-k", 0, 200, p["top_k"])
+
+# --- 5. Initialize client & sessions ---
+if "chat_client" not in st.session_state:
     st.session_state.chat_client = ChatClient()
 client = st.session_state.chat_client
+client.params = st.session_state.params
 
-# Initialize current chat session
-if 'current_chat' not in st.session_state:
-    st.session_state.current_chat = None
-
-st.sidebar.title("🗂️ Chats")
-# New chat button
-def new_chat():
+st.sidebar.title("Chats")
+if st.sidebar.button("+ New Chat"):
     new_id = str(uuid.uuid4())
     client.storage.create_chat(new_id)
     st.session_state.current_chat = new_id
 
-st.sidebar.button("+ New Chat", on_click=new_chat)
+sidebar_radio_ph = st.sidebar.empty()
+chats = client.storage.list_chats()
+if not chats:
+    new_id = str(uuid.uuid4())
+    client.storage.create_chat(new_id)
+    st.session_state.current_chat = new_id
+    chats = client.storage.list_chats()
+ids   = [c for c,_,_ in chats]
+names = [t or "Chat" for _,_,t in chats]
+idx = sidebar_radio_ph.radio(
+    "Select Session", list(range(len(ids))),
+    format_func=lambda i: names[i],
+    index=ids.index(st.session_state.get("current_chat",""))
+          if st.session_state.get("current_chat") in ids else 0
+)
+st.session_state.current_chat = ids[idx]
+cid = st.session_state.current_chat
 
-# List existing chats
-chats = client.list_chats()
-chat_ids = [cid for cid, _ in chats]
-if chat_ids:
-    selected = st.sidebar.radio(
-        "Select Session", chat_ids,
-        index=chat_ids.index(st.session_state.current_chat) if st.session_state.current_chat in chat_ids else 0
-    )
-    st.session_state.current_chat = selected
-else:
-    st.sidebar.info("No chats yet. Click + New Chat to start.")
+title_ph = st.empty()
+initial_title = client.storage.get_chat_title(cid)
+if initial_title:
+    title_ph.markdown(f"## {initial_title}")
 
-# Main chat area
-if st.session_state.current_chat:
-    st.title(f"Chat Session: {st.session_state.current_chat}")
-    # Display chat history
-    history = client.get_history(st.session_state.current_chat)
-    for msg in history:
-        role = msg['role']
-        content = msg['content']
-        if role == 'user':
-            st.markdown(f"**You:** {content}")
+# --- 6. Create two columns: chat on left, blank placeholder on right ---
+left_col, right_col = st.columns([4, 1])
+
+# Use a container inside the left column for chat history
+chat_container = left_col.container()
+
+if "history" not in st.session_state:
+    st.session_state.history = {}
+if cid not in st.session_state.history:
+    msgs = client.storage.fetch_history(cid)
+    st.session_state.history[cid] = [(m['role'], m['content']) for m in msgs]
+history = st.session_state.history[cid]
+
+def draw_history():
+    chat_container.empty()
+    with chat_container:
+        for role, text in history:
+            if role == "assistant_think":
+                with st.expander("Thinking…", expanded=False):
+                    render_bubble(text, role)
+            else:
+                render_bubble(text, role)
+
+if history:
+    draw_history()
+
+# --- 7. Input form & streaming ---
+with left_col.form("form", clear_on_submit=True):
+    user_input = st.text_input("Your message…", key="input")
+    send = st.form_submit_button("Send")
+
+if send and user_input:
+    history.append(("user", user_input))
+    with chat_container:
+        render_bubble(user_input, "user")
+
+    with chat_container:
+        if supports_think:
+            think_exp = st.expander("Thinking…", expanded=False)
+            think_ph  = think_exp.empty()
+        answer_ph = st.empty()
+
+    thinking_text = ""
+    answer_text   = ""
+    title_updated = False
+
+    for chunk in client.stream_message(cid, user_input, model_name):
+        # update title if needed
+        if not title_updated:
+            new_title = client.storage.get_chat_title(cid) or "Chat"
+            if new_title != initial_title:
+                title_ph.markdown(f"## {new_title}")
+                chats = client.storage.list_chats()
+                ids   = [c for c,_,_ in chats]
+                names = [t or "Chat" for _,_,t in chats]
+                idx = sidebar_radio_ph.radio(
+                    "Select Session", list(range(len(ids))),
+                    format_func=lambda i: names[i],
+                    index=ids.index(cid)
+                )
+                st.session_state.current_chat = ids[idx]
+            title_updated = True
+
+        # unpack chunk
+        ctype = chunk.get("type", "answer") if isinstance(chunk, dict) else "answer"
+        text  = chunk.get("text", "")      if isinstance(chunk, dict) else chunk
+
+        if ctype == "think" and supports_think:
+            thinking_text += text
+            think_ph.markdown(
+                f"<div class='bubble bot_thinking'>{thinking_text}</div>",
+                unsafe_allow_html=True
+            )
         else:
-            st.markdown(f"**Assistant:** {content}")
+            answer_text += text
+            answer_ph.markdown(
+                f"<div class='bubble bot'>{answer_text}</div>",
+                unsafe_allow_html=True
+            )
 
-    # Input box
-    def send_message():
-        user_input = st.session_state.user_input.strip()
-        if user_input:
-            client.send_message(st.session_state.current_chat, user_input)
-            st.session_state.user_input = ""
-            st.experimental_rerun()
+    history.append(("assistant_think", thinking_text))
+    history.append(("assistant", answer_text))
 
-    if 'user_input' not in st.session_state:
-        st.session_state.user_input = ""
-
-    st.text_input("Your message:", key='user_input', on_change=send_message)
-else:
-    st.title("Welcome to Llama 3 Chat")
-    st.write("Create or select a chat session from the sidebar to begin.")
+# right_col is left empty for future use
