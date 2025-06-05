@@ -223,7 +223,12 @@ if st.session_state.show_login:
                 st.experimental_rerun()
             else:
                 st.error("Invalid credentials")
-        oauth_res = google_oauth.authorize_button("Login with Google", key="google_login")
+        oauth_res = google_oauth.authorize_button(
+            "Login with Google",
+            redirect_uri=GOOGLE_REDIRECT_URI,
+            scope=GOOGLE_SCOPE,
+            key="google_login",
+        )
         if oauth_res and "token" in oauth_res:
             token = oauth_res.get("token")
             headers = {"Authorization": f"Bearer {token['access_token']}"}
