@@ -191,6 +191,12 @@ initial_title = client.storage.get_chat_title(cid)
 if initial_title:
     title_ph.markdown(f"## {initial_title}")
 
+
+# --- Layout: chat on left, placeholder column on right ---
+left_col, right_col = st.columns([4, 1])
+
+# --- Login/Register controls at top of sidebar ---
+with st.sidebar:
 # --- Layout: chat on left, login sidebar on right ---
 left_col, right_col = st.columns([4, 1])
 
@@ -223,7 +229,12 @@ if st.session_state.show_login:
                 st.experimental_rerun()
             else:
                 st.error("Invalid credentials")
-        oauth_res = google_oauth.authorize_button("Login with Google", key="google_login")
+        oauth_res = google_oauth.authorize_button(
+            "Login with Google",
+            redirect_uri=GOOGLE_REDIRECT_URI,
+            scope=GOOGLE_SCOPE,
+            key="google_login",
+        )
         if oauth_res and "token" in oauth_res:
             token = oauth_res.get("token")
             headers = {"Authorization": f"Bearer {token['access_token']}"}
@@ -245,11 +256,15 @@ if st.session_state.show_register:
         reg_email = st.text_input("Email", key="reg_email_main")
         reg_pw = st.text_input("Password", type="password", key="reg_pw_main")
         if st.button("Register", key="register_submit"):
-            if "@" in reg_email and auth.create_user(reg_email, reg_pw):
+            if "@" not in reg_email:
+                st.error("Please enter a valid email")
+            elif auth.user_exists(reg_email):
+                st.error("User already exists")
+            elif auth.create_user(reg_email, reg_pw):
                 st.success("Account created")
                 st.session_state.show_register = False
             else:
-                st.error("User exists")
+                st.error("Could not create account")
         if st.button("Back to login", key="switch_to_login"):
             st.session_state.show_register = False
             st.session_state.show_login = True
@@ -275,7 +290,7 @@ def draw_history():
             else:
                 render_bubble(text, role)
 
-if history:
+if history and not (st.session_state.show_login or st.session_state.show_register):
     draw_history()
 
 # --- 7. Input form & streaming ---
