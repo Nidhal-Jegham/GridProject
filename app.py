@@ -191,10 +191,11 @@ initial_title = client.storage.get_chat_title(cid)
 if initial_title:
     title_ph.markdown(f"## {initial_title}")
 
-# --- Top right login/register controls ---
-top_right = st.empty()
-with top_right:
-    st.markdown("<div class='top-right'>", unsafe_allow_html=True)
+# --- Layout: chat on left, login sidebar on right ---
+left_col, right_col = st.columns([4, 1])
+
+# --- Login/Register controls in right sidebar ---
+with right_col:
     if st.session_state.user:
         st.write(f"Logged in as {st.session_state.user}")
         if st.button("Logout", key="logout_btn"):
@@ -205,7 +206,6 @@ with top_right:
             st.session_state.show_login = True
         if st.button("Make Account", key="register_btn"):
             st.session_state.show_register = True
-    st.markdown("</div>", unsafe_allow_html=True)
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("<p style='text-align:center; font-size: 32px;'>\U0001F464</p>", unsafe_allow_html=True)
@@ -254,9 +254,6 @@ if st.session_state.show_register:
             st.session_state.show_register = False
             st.session_state.show_login = True
         st.markdown("</div>", unsafe_allow_html=True)
-
-# --- 6. Create two columns: chat on left, blank placeholder on right ---
-left_col, right_col = st.columns([4, 1])
 
 # Use a container inside the left column for chat history
 chat_container = left_col.container()
