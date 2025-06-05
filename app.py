@@ -1,6 +1,7 @@
 import streamlit as st
 import uuid
 from client import ChatClient
+from auth import AuthManager
 
 st.set_page_config(layout="wide")
 
@@ -50,6 +51,11 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# --- Authentication setup ---
+auth = AuthManager()
+if "user" not in st.session_state:
+    st.session_state.user = None
+
 # --- 2. Chat bubble helper ---
 def render_bubble(message: str, role: str):
     if role == "user":
@@ -81,13 +87,14 @@ def render_bubble(message: str, role: str):
         """, unsafe_allow_html=True)
 
 # --- 3. Sidebar & model config ---
-MODELS = {
+ALL_MODELS = {
     "LLaMA 3.2 3B":    {"name": "llama3.2:3b", "ram": "2.0 GB",  "supports_think": False},
     "LLaMA 3.1 8B":    {"name": "llama3.1:8b", "ram": "4.9 GB",  "supports_think": False},
     "Qwen 3 14B":      {"name": "qwen3:14b",  "ram": "9.3 GB",  "supports_think": True},
     "DeepSeek R1 70B": {"name": "deepseek-r1:70b","ram":"42 GB","supports_think": True},
     "LLaMA 3.1 70B":   {"name": "llama3.1:70b","ram":"39 GB",   "supports_think": False},
 }
+MODELS = ALL_MODELS if st.session_state.user else {"LLaMA 3.2 3B": ALL_MODELS["LLaMA 3.2 3B"]}
 st.sidebar.title("**Choose a model:**")
 selected = st.sidebar.selectbox("", list(MODELS.keys()))
 cfg = MODELS[selected]
@@ -145,6 +152,36 @@ title_ph = st.empty()
 initial_title = client.storage.get_chat_title(cid)
 if initial_title:
     title_ph.markdown(f"## {initial_title}")
+
+st.sidebar.markdown("---")
+with st.sidebar.expander("\U0001F464 Account", expanded=False):
+    if st.session_state.user:
+        st.write(f"Logged in as {st.session_state.user}")
+        new_pw = st.text_input("New password", type="password", key="pw_change")
+        if st.button("Change password"):
+            if new_pw:
+                auth.change_password(st.session_state.user, new_pw)
+                st.success("Password updated")
+        if st.button("Logout"):
+            st.session_state.user = None
+            st.experimental_rerun()
+    else:
+        login_user = st.text_input("Username or Email", key="login_user")
+        login_pw = st.text_input("Password", type="password", key="login_pw")
+        if st.button("Login"):
+            if auth.validate_user(login_user, login_pw):
+                st.session_state.user = login_user
+                st.experimental_rerun()
+            else:
+                st.error("Invalid credentials")
+        reg_user = st.text_input("New Username or Email", key="reg_user")
+        reg_pw = st.text_input("New Password", type="password", key="reg_pw")
+        if st.button("Register"):
+            if auth.create_user(reg_user, reg_pw):
+                st.success("Account created")
+            else:
+                st.error("User exists")
+        st.button("Login with Google", help="Placeholder")
 
 # --- 6. Create two columns: chat on left, blank placeholder on right ---
 left_col, right_col = st.columns([4, 1])
