@@ -191,11 +191,17 @@ initial_title = client.storage.get_chat_title(cid)
 if initial_title:
     title_ph.markdown(f"## {initial_title}")
 
+
 # --- Layout: chat on left, placeholder column on right ---
 left_col, right_col = st.columns([4, 1])
 
 # --- Login/Register controls at top of sidebar ---
 with st.sidebar:
+# --- Layout: chat on left, login sidebar on right ---
+left_col, right_col = st.columns([4, 1])
+
+# --- Login/Register controls in right sidebar ---
+with right_col:
     if st.session_state.user:
         st.write(f"Logged in as {st.session_state.user}")
         if st.button("Logout", key="logout_btn"):
